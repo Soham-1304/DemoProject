@@ -1,0 +1,355 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF to Speech Converter</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://unpkg.com/wavesurfer.js@6.6.3"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>PDF to Speech Converter</h1>
+        
+        <div class="upload-section">
+            <input type="file" id="fileInput" class="file-input" accept=".pdf">
+            <label for="fileInput" class="upload-btn">Choose PDF File</label>
+            <button onclick="uploadFile()" class="upload-btn">Upload PDF</button>
+            <div id="fileName" class="file-name"></div>
+        </div>
+
+        <div class="content-wrapper">
+            <div class="controls-container">
+                <div class="summary-section">
+                    <div class="summary-label">Summary</div>
+                    <div id="summaryContainer" class="summary-container">
+                        Upload a PDF and select "Summarize Current Page" to see a summary here.
+                    </div>
+                </div>
+                
+                <div class="audio-section">
+                    <div id="waveform"></div>
+                    <div class="audio-controls">
+                        <button onclick="playPause()" class="btn btn-primary">Play/Pause</button>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button onclick="readCurrentPage()" class="btn btn-primary">Read Current Page</button>
+                    <button onclick="summarizeCurrentPage()" class="btn btn-secondary">Summarize Current Page</button>
+                    <button onclick="readSummary()" class="btn btn-accent">Read Summary</button>
+                </div>
+
+                <div class="error-message" id="errorMessage"></div>
+                <div class="success-message" id="successMessage"></div>
+            </div>
+
+            <div class="pdf-container">
+                <div id="pdfViewer"></div>
+                <div class="page-controls">
+                    <button onclick="prevPage()" class="btn btn-secondary">Previous Page</button>
+                    <div id="pageInfo">Page <span id="currentPage">1</span> of <span id="totalPages">0</span></div>
+                    <button onclick="nextPage()" class="btn btn-secondary">Next Page</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="loading">
+        <div class="loading-spinner"></div>
+        <p>Processing...</p>
+    </div>
+
+    <script>
+        let fileId;
+        let currentPage = 1;
+        let totalPages = 0;
+        let summaryText = "";
+        let pdfDoc = null;
+        const wavesurfer = WaveSurfer.create({
+            container: '#waveform',
+            waveColor: '#3a86ff',
+            progressColor: '#4361ee',
+            cursorColor: '#7209b7',
+            barWidth: 2,
+            barRadius: 3,
+            responsive: true,
+            height: 80
+        });
+
+        // Initialize PDF.js
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        function showLoading() {
+            document.querySelector('.loading').style.display = 'flex';
+        }
+
+        function hideLoading() {
+            document.querySelector('.loading').style.display = 'none';
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            setTimeout(() => {
+                errorDiv.style.display = 'none';
+            }, 5000);
+        }
+
+        function showSuccess(message) {
+            const successDiv = document.getElementById('successMessage');
+            successDiv.textContent = message;
+            successDiv.style.display = 'block';
+            setTimeout(() => {
+                successDiv.style.display = 'none';
+            }, 3000);
+        }
+
+        async function renderPage(pageNum) {
+            if (!pdfDoc) return;
+            
+            try {
+                const page = await pdfDoc.getPage(pageNum);
+                const viewport = page.getViewport({ scale: 1.5 });
+
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+
+                const renderContext = {
+                    canvasContext: context,
+                    viewport: viewport
+                };
+
+                const pdfViewer = document.getElementById('pdfViewer');
+                pdfViewer.innerHTML = '';
+                pdfViewer.appendChild(canvas);
+
+                await page.render(renderContext).promise;
+                currentPage = pageNum;
+                document.getElementById('currentPage').textContent = currentPage;
+            } catch (error) {
+                console.error("Error rendering PDF:", error);
+                showError('Error rendering PDF page');
+            }
+        }
+
+        function prevPage() {
+            if (currentPage > 1) {
+                renderPage(currentPage - 1);
+            }
+        }
+
+        function nextPage() {
+            if (currentPage < totalPages) {
+                renderPage(currentPage + 1);
+            }
+        }
+
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const fileName = e.target.files[0]?.name;
+            document.getElementById('fileName').textContent = fileName ? `Selected file: ${fileName}` : '';
+        });
+
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showError("Please select a file");
+                return;
+            }
+
+            if (!file.name.endsWith('.pdf')) {
+                showError("Please select a PDF file");
+                return;
+            }
+
+            showLoading();
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('http://localhost:8000/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Upload failed');
+                }
+
+                const data = await response.json();
+                fileId = data.file_id;
+                totalPages = data.total_pages;
+                document.getElementById('totalPages').textContent = totalPages;
+                
+                // Load and display PDF
+                const pdfUrl = `http://localhost:8000/pdf/${fileId}`;
+                pdfDoc = await pdfjsLib.getDocument(pdfUrl).promise;
+                await renderPage(1);
+                
+                showSuccess("File uploaded successfully!");
+            } catch (error) {
+                console.error("Upload error:", error);
+                showError(error.message || "An error occurred while uploading");
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function readCurrentPage() {
+            if (!fileId) {
+                showError("Please upload a PDF first");
+                return;
+            }
+            showLoading();
+            try {
+                const response = await fetch('http://localhost:8000/tts', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        "file_id": fileId, 
+                        "page_number": currentPage - 1 
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Failed to generate speech');
+                }
+                
+                const data = await response.json();
+                wavesurfer.load(`http://localhost:8000${data.audio_url}`);
+                showSuccess("Audio generated successfully!");
+            } catch (error) {
+                console.error("Text-to-speech error:", error);
+                showError(error.message || "An error occurred during text-to-speech conversion");
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function summarizeCurrentPage() {
+            if (!fileId) {
+                showError("Please upload a PDF first");
+                return;
+            }
+            showLoading();
+            try {
+                const response = await fetch('http://localhost:8000/summarize', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        "file_id": fileId, 
+                        "page_number": currentPage - 1 
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Failed to summarize');
+                }
+                
+                const data = await response.json();
+                summaryText = data.summary;
+                document.getElementById('summaryContainer').innerText = summaryText;
+                showSuccess("Text summarized successfully!");
+            } catch (error) {
+                console.error("Summarization error:", error);
+                showError(error.message || "An error occurred during summarization");
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function readSummary() {
+            if (!summaryText) {
+                showError("Please summarize the text first");
+                return;
+            }
+            showLoading();
+            try {
+                const response = await fetch('http://localhost:8000/tts', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        "text": summaryText 
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Failed to generate speech');
+                }
+                
+                const data = await response.json();
+                wavesurfer.load(`http://localhost:8000${data.audio_url}`);
+                showSuccess("Audio generated successfully!");
+            } catch (error) {
+                console.error("Text-to-speech error:", error);
+                showError(error.message || "An error occurred during text-to-speech conversion");
+            } finally {
+                hideLoading();
+            }
+        }
+
+        function playPause() {
+            wavesurfer.playPause();
+        }
+
+        // Add event listeners for the waveform
+        wavesurfer.on('ready', function() {
+            showSuccess("Audio ready to play");
+        });
+
+        wavesurfer.on('error', function(err) {
+            console.error("WaveSurfer error:", err);
+            showError("Error loading audio");
+        });
+    </script>
+</body>
+</html>
